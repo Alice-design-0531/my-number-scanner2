@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>數字辨識 - 自動鎖定版</title>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @keyframes success-pulse {
+            0% { box-shadow: 0 0 0 0 rgba(74, 222, 128, 0.7); }
+            70% { box-shadow: 0 0 0 15px rgba(74, 222, 128, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(74, 222, 128, 0); }
+        }
+        .lock-success {
+            animation: success-pulse 1s ease-out;
+            border: 4px solid #4ade80 !important;
+        }
+    </style>
+</head>
+<body class="bg-slate-950 text-white min-h-screen flex flex-col items-center p-4">
+
+    <div class="max-w-md w-full bg-slate-900 rounded-3xl overflow-hidden shadow-2xl border border-slate-800 p-6">
+        <h1 class="text-center font-bold text-blue-400 mb-4 text-lg tracking-widest">SMART SCANNER</h1>
+
+        <div class="relative aspect-video rounded-xl overflow-hidden bg-black mb-4 border border-slate-700">
+            <video id="video" class="w-full h-full object-cover" autoplay playsinline></video>
+            <div id="scan-frame" class="absolute inset-0 flex items-center justify-center pointer-events-none">
+                <div class="w-48 h-24 border-2 border-blue-500 rounded-lg shadow-[0_0_15px_rgba(59,130,246,0.3)] transition-all duration-300"></div>
+            </div>
+        </div>
+
+        <div class="bg-black/50 p-4 rounded-xl mb-4 text-center">
+            <canvas id="canvas" class="mx-auto rounded bg-white w-48 h-24 border border-zinc-700"></canvas>
+            <div class="flex justify-center gap-2 mt-3">
+                <button onclick="setMode('bw')" id="btn-bw" class="text-[10px] bg-blue-600 px-3 py-1 rounded-full">高對比</button>
+                <button onclick="setMode('gray')" id="btn-gray" class="text-[10px] bg-zinc-700 px-3 py-1 rounded-full">灰階</button>
+            </div>
+        </div>
+
+        <div id="result-container" class="bg-zinc-800 rounded-2xl p-6 text-center border border-zinc-700 transition-all">
+            <div id="result" class="text-6xl font-mono font-bold text-green-400">--</div>
+            <p id="status" class="text-[10px] text-zinc-400 mt-2 uppercase">模型載入中...</p>
+            <div id="conf" class="text-[10px] text-blue-400 mt-1 font-mono"></div>
+        </div>
+
+        <button id="start-btn" disabled class="w-full mt-6 bg-zinc-700 py-4 rounded-xl font-bold transition-all opacity-50">
+            請稍候...
+        </button>
+        
+        <p class="text-center text-[10px] text-zinc-500 mt-4">提示：信心度 > 80% 將自動停止並鎖定結果</p>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const resultDiv = document.getElementById('result');
+        const statusP = document.getElementById('status');
+        const confDiv = document.getElementById('conf');
+        const startBtn = document.getElementById('start-btn');
+        const scanFrame = document.querySelector('#scan-frame div');
+        const resultContainer = document.getElementById('result-container');
+
+        let isRunning = false;
+        let mode = 'bw';
+        let worker = null;
+
+        async function initOCR() {
+            try {
+                worker = await Tesseract.createWorker();
+                await worker.loadLanguage('eng');
+                await worker.initialize('eng');
+                await worker.setParameters({
+                    tessedit_char_whitelist: '0123456789',
+                    tessedit_pageseg_mode: '7',
+                });
+                statusP.innerText = "系統就緒";
+                startBtn.disabled = false;
+                startBtn.innerText = "開始掃描";
+                startBtn.className = "w-full mt-6 bg-blue-600 py-4 rounded-xl font-bold active:scale-95 cursor-pointer";
+            } catch (e) {
+                statusP.innerText = "初始化失敗";
+            }
+        }
+
+        window.setMode = (m) => {
+            mode = m;
+            document.getElementById('btn-bw').className = m === 'bw' ? 'text-[10px] bg-blue-600 px-3 py-1 rounded-full' : 'text-[10px] bg-zinc-700 px-3 py-1 rounded-full';
+            document.getElementById('btn-gray').className = m === 'gray' ? 'text-[10px] bg-blue-600 px-3 py-1 rounded-full' : 'text-[10px] bg-zinc-700 px-3 py-1 rounded-full';
+        };
+
+        navigator.mediaDevices.getUserMedia({ 
+            video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } 
+        }).then(stream => { video.srcObject = stream; });
+
+        async function scan() {
+            if (!isRunning) return;
+
+            canvas.width = 400;
+            canvas.height = 200;
+            ctx.drawImage(video, video.videoWidth/2 - 100, video.videoHeight/2 - 50, 200, 100, 0, 0, 400, 200);
+
+            const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const d = imgData.data;
+            for (let i = 0; i < d.length; i += 4) {
+                const avg = d[i] * 0.299 + d[i+1] * 0.587 + d[i+2] * 0.114;
+                const v = mode === 'bw' ? (avg < 125 ? 0 : 255) : avg;
+                d[i] = d[i+1] = d[i+2] = v;
+            }
+            ctx.putImageData(imgData, 0, 0);
+
+            try {
+                const { data: { text, confidence } } = await worker.recognize(canvas);
+                const clean = text.replace(/[^0-9]/g, '');
+
+                if (clean) {
+                    resultDiv.innerText = clean;
+                    confDiv.innerText = `CONFIDENCE: ${Math.round(confidence)}%`;
+
+                    // 自動鎖定邏輯
+                    if (confidence >= 80) {
+                        isRunning = false; // 停止循環
+                        triggerSuccess(clean);
+                        return; // 跳出 scan
+                    }
+                }
+            } catch (e) {}
+
+            if (isRunning) setTimeout(scan, 400);
+        }
+
+        function triggerSuccess(finalText) {
+            // 視覺反饋
+            statusP.innerText = "辨識成功 - 已鎖定";
+            statusP.className = "text-[10px] text-green-400 mt-2 font-bold";
+            startBtn.innerText = "重新掃描";
+            startBtn.className = "w-full mt-6 bg-green-600 py-4 rounded-xl font-bold";
+            
+            // 加入成功動畫
+            scanFrame.classList.add('lock-success');
+            resultContainer.classList.add('border-green-500');
+            
+            // 震動回饋 (手機支援的話)
+            if (navigator.vibrate) navigator.vibrate(100);
+        }
+
+        startBtn.onclick = () => {
+            // 重置狀態
+            isRunning = !isRunning;
+            if (isRunning) {
+                resultDiv.innerText = "--";
+                confDiv.innerText = "";
+                statusP.innerText = "掃描中...";
+                statusP.className = "text-[10px] text-zinc-400 mt-2 uppercase";
+                startBtn.innerText = "停止";
+                startBtn.className = "w-full mt-6 bg-red-600 py-4 rounded-xl font-bold";
+                scanFrame.classList.remove('lock-success');
+                resultContainer.classList.remove('border-green-500');
+                scan();
+            } else {
+                startBtn.innerText = "開始掃描";
+                startBtn.className = "w-full mt-6 bg-blue-600 py-4 rounded-xl font-bold";
+            }
+        };
+
+        initOCR();
+    </script>
+</body>
+</html>
